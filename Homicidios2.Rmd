@@ -1,0 +1,709 @@
+---
+title: "Monitoreo Nacional de Homicidios"
+author: Saba Consultores
+date: "Del 29 de julio al 10 de noviembre de 2024"
+output:
+    html_document:
+      self_contained: true
+      # theme:
+      #   bootswatch: united
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+#rmarkdown::render(output_file = 'report.html')
+#knitr::knit('plotly-report.md', 'plotly-report.Rmd')
+#markdown::markdownToHTML('plotly-report.md', 'plotly-report.html')
+
+library(tidyverse)
+library(htmltools)
+library(plotly)
+```
+
+<!--  ```{r Logo} -->
+<!--  #dir("/Users/paulaborrego/Documents/SABA/R/Homicidios") -->
+
+<!--  htmltools::img(src = "/Users/paulaborrego/Documents/SABA/R/Homicidios/recortado2.png", -->
+<!--                 alt = 'logo', -->
+<!--                 style = 'position:absolute; top:0; right:100px; padding:10px; width: 235x; height: 160px;') -->
+<!--  ``` -->
+
+```{r Leer_datos, include=FALSE}
+
+nacional <- read.csv("HomicidiosNacionales.csv", header = TRUE, sep = ",")
+# Cambio el nombre de homicidios a Global para que coincidan las formulas
+names(nacional) <- c("Fechas", "Homicidios")
+
+```
+
+```{r funcionesMonitoreo, eval=FALSE, warning=FALSE, include=FALSE}
+
+# Porcentajes con base al número hombres y mujeres por base
+porcentajesMoni <- function(TablaLlena, enes){
+  Tabla <- bind_cols(TablaLlena, enes) %>%
+    mutate(porcientoH = Hombres /n_h) %>%
+    mutate(porcientoM = Mujeres /n_m) %>%
+    transmute(Hombres = porcientoH, Mujeres = porcientoM)
+  return(Tabla)
+}
+
+#--------------------------------------------- MÁRGENES DE ERROR  ----------------------------------------------#
+# Funcion para ME y limites
+MEMoni <- function(Tabla, enes){
+  # Quitar fechas para promediar
+  Tabla <-Tabla[-1]
+  # Promedios globales ponderados por sexo
+  TablaSE <- as.data.frame(Tabla) %>%
+    mutate(Global = rowMeans(Tabla))
+  # Calculo del error estándar por renglon o sea por fecha
+  TablaSE$SE <-NA
+  n <- pull(enes,n)
+  for(i in seq_along(n)){
+    TablaSE[i,4] <- sqrt((TablaSE[i,3]*(1-TablaSE[i,3]))/(n[i]))}
+  # Margenn de error y limites
+  TablaSE <- TablaSE %>%
+    mutate(ME = 2*SE) %>% # SABA me dijo que usara 2 en lugar de 1.96
+    mutate(
+      LI = pmax(Global - ME, 0),
+      LS = Global + ME)
+  return(TablaSE)
+}
+
+
+#--------------------------------------------- LÍMITES DE CONTROL ----------------------------------------------#
+# Funcion limites de control 
+LimitesDeControl <- function(TablaSE, Fechas){
+  # ------ Lo que hice al principio
+  # Límites iniciales
+  # C <- mean(TablaSE$Global[1:4])
+  # sigma <- sd(TablaSE$Global[1:4])
+  # TablaLim <-  TablaSE %>%
+  #  transmute(fecha = Fechas ,
+  #          Global,
+  #          LS = C + 3*sigma,
+  #          LAS = C + 2*sigma,
+  #          LC = C,
+  #          LAI = C - 2*sigma,
+  #          LI = C - 3*sigma)
+  # ------  
+  
+  
+  # ------ Fórmulas para los límites de control para proporciones
+  # Límites iniciales
+  C <- mean(TablaSE$Global[1:4])
+  n <- 150
+  sigma <- sqrt((C*(1-C))/n)
+  TablaLim <-  TablaSE %>%
+    transmute(fecha = Fechas ,
+              Global,
+              LS = C + 3*sigma,
+              LAS = C + 2*sigma,
+              LC = C,
+              LAI = C - 2*sigma,
+              LI = C - 3*sigma)
+  # ------ 
+  
+  
+  # ------ Fórmulas como las tienen en SABA
+  # Xbar <- mean(TablaSE$Global[1:4])
+  # Rbar <- mean(TablaSE$Rangos[1:4])
+  # sigma <- Rbar / 1.128 # Usando la constante d2 para n=2
+  # 
+  # TablaLim <-  TablaSE %>%
+  #  transmute(fecha = Fechas , 
+  #            Global,
+  #            LS = Xbar + 3*sigma,
+  #            LAS = Xbar + 2*sigma,
+  #            LC = Xbar,
+  #            LAI = Xbar - 2*sigma,
+  #            LI = Xbar - 3*sigma)
+  # ------
+  
+  
+  
+  return(TablaLim)
+}
+
+
+
+# Funcion limites de control 
+# ------ Fórmulas para los límites de control para promedios
+LimitesDeControlPromedios <- function(TablaSE, Fechas){
+  
+  Xbar <- mean(TablaSE$Global[1:4])
+  Rbar <- mean(TablaSE$Rangos[1:4])
+  A2 <- 0.153 # Para n=25
+  
+  TablaLim <-  TablaSE %>%
+    transmute(fecha = Fechas ,
+              Global,
+              LS = Xbar +  A2 * Rbar,
+              LAS = Xbar + A2 * Rbar * (2/3),
+              LC = Xbar,
+              LAI = Xbar - A2 * Rbar * (2/3),
+              LI = Xbar - A2 * Rbar )
+  
+  return(TablaLim)
+}
+
+
+
+
+
+#------------------------------------ SERIES-----------------------------------#
+
+Series <- function(TablaLim){
+  encima <<- 0
+  debajo <<- 0
+  inicioEncima <<- c()
+  mitadEncima <<- c()
+  finEncima <<- c()
+  YminEncima <<- c()
+  YmaxEncima <<- c()
+  inicioDebajo <<- c()
+  mitadDebajo <<- c()
+  finDebajo <<- c()
+  YminDebajo <<- c()
+  YmaxDebajo <<- c()
+  HayEncima <<- 0
+  HayDebajo <<- 0
+  
+  #Agregando un renglon al final 
+  #TablaLim[nrow(TablaLim) + 1,] <- NA
+  
+  for (i in 1:nrow(TablaLim)) {
+    # Contando los puntos por encima o debajo del promedio
+    ifelse(TablaLim$Global[i] > TablaLim$LC[i], encima <- encima + 1, encima <- 0)
+    ifelse(TablaLim$Global[i] < TablaLim$LC[i], debajo <- debajo + 1, debajo <- 0)
+    
+    # Para marcar la series por encima del promedio
+    if(encima == 5){ # Indicando que hay serie por encima
+      HayEncima <<- HayEncima +1
+      # Fechas que comprende la serie
+      inicioEncima <<- append( inicioEncima, TablaLim$fecha[i-4])
+      mitadEncima <<- append( mitadEncima, TablaLim$fecha[i-2])
+      finEncima <<- append(finEncima, TablaLim$fecha[i])
+      YmaxEncima <<- append(YmaxEncima, max(TablaLim$Global[(i-4):i])+0.05)
+      YminEncima <<- append(YminEncima, TablaLim$LC[i])
+      # Resetear el contadores
+      encima <<- 0
+      debajo <<- 0
+      # Recálculo de límites
+      if( i != nrow(TablaLim)){
+        C <- mean(TablaLim$Global[(i-4):i])
+        sigma <- sd(TablaLim$Global[(i-4):i])
+        TablaLim$LS[(i+1):nrow(TablaLim)] <- C + 3*sigma
+        TablaLim$LAS[(i+1):nrow(TablaLim)] <- C + 2*sigma
+        TablaLim$LC[(i+1):nrow(TablaLim)] <- C
+        TablaLim$LAI[(i+1):nrow(TablaLim)] <- C - 2*sigma
+        TablaLim$LI[(i+1):nrow(TablaLim)] <- C - 3*sigma
+      } # fin del if
+      next}
+    if(debajo == 5){ # Indicando que hay serie por debajo
+      HayDebajo <<- HayDebajo +1
+      # Fechas que comprende la serie
+      inicioDebajo <<- append( inicioDebajo, TablaLim$fecha[i-4])
+      mitadDebajo <<- append( mitadDebajo, TablaLim$fecha[i-2])
+      finDebajo <<- append(finDebajo, TablaLim$fecha[i])
+      YmaxDebajo <<- append(YmaxDebajo, TablaLim$LC[i])
+      YminDebajo <<- append(YminDebajo, min(TablaLim$Global[(i-4):i])-0.03)
+      # Resetear el contadores
+      encima <<- 0
+      debajo <<- 0
+      # Recálculo de límites
+      if(i<nrow(TablaLim)){
+        C <- mean(TablaLim$Global[(i-4):i])
+        sigma <- sd(TablaLim$Global[(i-4):i])
+        TablaLim$LS[(i+1):nrow(TablaLim)] <- C + 3*sigma
+        TablaLim$LAS[(i+1):nrow(TablaLim)] <- C + 2*sigma
+        TablaLim$LC[(i+1):nrow(TablaLim)] <- C
+        TablaLim$LAI[(i+1):nrow(TablaLim)] <- C - 2*sigma
+        TablaLim$LI[(i+1):nrow(TablaLim)] <- C - 3*sigma}
+      next}
+    
+  }# Fin del for
+  
+  return(TablaLim)
+}
+
+
+#-------------------------- ALERTAS Y ADVERTENCIAS ----------------------------#
+
+Alertas <- function(TablaLim){
+  TablaLim$col <<- NA
+  for (i in 1:(nrow(TablaLim))) {
+    ifelse(TablaLim$Global[i] > TablaLim$LS[i], TablaLim$col[i] <- "blue",
+           ifelse(between(TablaLim$Global[i], TablaLim$LAS[i], TablaLim$LS[i]), TablaLim$col[i] <- "green",
+                  ifelse(between(TablaLim$Global[i], TablaLim$LAI[i], TablaLim$LAS[i]), TablaLim$col[i] <- "black",
+                         ifelse(between(TablaLim$Global[i], TablaLim$LI[i], TablaLim$LAI[i]), TablaLim$col[i] <- "orange",
+                                TablaLim$col[i] <- "red"))))}
+  return(TablaLim)
+}
+
+
+#ALERTAS Y ADVERTENCIAS INVERTIDAS
+AlertasInvertidas <- function(TablaLim){
+  TablaLim$col <- NA
+  for (i in 1:(nrow(TablaLim))) {
+    ifelse(TablaLim$Global[i] > TablaLim$LS[i], TablaLim$col[i] <- "red",
+           ifelse(between(TablaLim$Global[i], TablaLim$LAS[i], TablaLim$LS[i]), TablaLim$col[i] <- "orange",
+                  ifelse(between(TablaLim$Global[i], TablaLim$LAI[i], TablaLim$LAS[i]), TablaLim$col[i] <- "black",
+                         ifelse(between(TablaLim$Global[i], TablaLim$LI[i], TablaLim$LAI[i]), TablaLim$col[i] <- "green",
+                                TablaLim$col[i] <- "blue"))))}
+  
+  
+  return(TablaLim)
+}
+
+
+#ALERTAS Y ADVERTENCIAS NEUTRAS
+AlertasNeutras <- function(TablaLim){
+  TablaLim$col <- NA
+  for (i in 1:(nrow(TablaLim))) {
+    ifelse(TablaLim$Global[i] > TablaLim$LS[i], TablaLim$col[i] <- "darkgray",
+           ifelse(between(TablaLim$Global[i], TablaLim$LAS[i], TablaLim$LS[i]), TablaLim$col[i] <- "lightgray",
+                  ifelse(between(TablaLim$Global[i], TablaLim$LAI[i], TablaLim$LAS[i]), TablaLim$col[i] <- "black",
+                         ifelse(between(TablaLim$Global, TablaLim$LI[i], TablaLim$LAI[i]), TablaLim$col[i] <- "lightgray",
+                                TablaLim$col[i] <- "darkgray"))))}
+  return(TablaLim)
+}
+
+
+# -------------------------------------- T E N D E N C I A S ----------------------------------------#
+# ------------------------------------------- ESTRICTAS ----------------------------------------#
+
+#TENDENCIAS ESTRICTAS: ASCENDENTES O DESCENDENTES
+Tendencias <- function(TablaLim){
+  TablaLim$Tendencia <- "nada"
+  HayTendencia <<- 0
+  alza <- 0
+  baja <- 0
+  
+  for (i in 1:(nrow(TablaLim)-1)) {
+    #if(TablaLim$Global[i] > C, alza <- alza + 1,
+    if(TablaLim$Global[i+1] < TablaLim$Global[i])
+    { baja <- baja + 1 
+    alza <- 0  # Resetear el contador
+    }
+    else{alza <- alza + 1
+    baja<- 0 # Resetear el contador
+    }
+    # print(paste0(i,sep= ",", "baja = ", baja ))
+    # print(paste0(i,sep= ",", "alza = ", alza ))
+    
+    # Para marcar la tendencia a la baja
+    if(baja >= 4){ HayTendencia <<- HayTendencia + 1
+    TablaLim$Tendencia[(i-(baja -1)):(i+1)] <- "A la baja"
+    # print(paste0(i,sep= ",", "baja = ", baja ))
+    }
+    if(alza >= 4){ HayTendencia <<- HayTendencia + 1
+    TablaLim$Tendencia[(i-3):(i+1)] <- "Al alza"
+    # print(paste0(i,sep= ",", "alza = ", alza))
+    }
+    
+  } #FIN DEL FOR
+  return(TablaLim)
+}
+
+
+
+# ---------------------------- T E N D E N C I A S  S E R R U C H O S -------------------------------#
+# -------------------------------------- CASO 1, PICO2, BAJA ----------------------------------------#
+# TENDENCIAS SERRUCHO CASO 1: CUANDO SOLO UN PICO BAJA Y LUEGO CONTINUA LA TENDENCIA
+# EN ESTE CASO EL SEGUNDO PICO CUANDO LA TENDENCIA ES A LA BAJA
+# EVALUANDO BLOQUES DE 5 PUNTOS CONSECUTIVOS
+SerruchoPico2Baja <- function(TablaLim){
+  TablaLim$Serrucho2B <- "nada"
+  HaySerrucho2B <<- 0
+  
+  for (i in 3:(nrow(TablaLim)-2)) {
+    # print(paste0("inicio", i))
+    # print(paste0(TablaLim$Global[i-2], ">", TablaLim$Global[i-1], "?"))
+    # print(paste0(TablaLim$Global[i-2], ">", TablaLim$Global[i], "o", TablaLim$Global[i-1], ">=", TablaLim$Global[i], "?"))
+    # print(paste0(TablaLim$Global[i-1], ">", TablaLim$Global[i+1], "?"))
+    # print(paste0(TablaLim$Global[i+1], ">", TablaLim$Global[i+2], "? fin"))
+    # 
+    if(TablaLim$Global[i-2] > TablaLim$Global[i-1] &
+       TablaLim$Global[i-2] > TablaLim$Global[i] & #| TablaLim$Global[i-1] >= TablaLim$Global[i] &
+       TablaLim$Global[i-1] > TablaLim$Global[i+1] &
+       TablaLim$Global[i+1] > TablaLim$Global[i+2])
+    { HaySerrucho2B<<- HaySerrucho2B + 1
+    TablaLim$Serrucho2B[(i-2):(i+2)] <- "A la baja"
+    }
+  } #FIN DEL FOR
+  return(TablaLim)
+}
+
+# -------------------------------------- CASO 1, PICO2, ALZA ----------------------------------------#
+# TENDENCIAS SERRUCHO CASO 1: CUANDO SOLO UN PICO BAJA Y LUEGO CONTINUA LA TENDENCIA
+# EN ESTE CASO EL SEGUNDO PICO CUANDO LA TENDENCIA ES AL ALZA
+# EVALUANDO BLOQUES DE 5 PUNTOS CONSECUTIVOS
+
+SerruchoPico2Alza <- function(TablaLim){
+  TablaLim$Serrucho2A <- "nada"
+  HaySerrucho2A <<- 0
+  
+  for (i in 3:(nrow(TablaLim)-2)) {
+    # print(paste0("inicio", i, "evaluando", i-2, " - ", i+2))
+    # print(paste0(TablaLim$Global[i-2], "<", TablaLim$Global[i-1], "?", TablaLim$Global[i-2] < TablaLim$Global[i-1] ))
+    # print(paste0(TablaLim$Global[i-2], "<", TablaLim$Global[i], "?", TablaLim$Global[i-2] < TablaLim$Global[i] ))
+    #              #, "o", TablaLim$Global[i-1], ">=", TablaLim$Global[i], "?"))
+    # print(paste0(TablaLim$Global[i-1], "<", TablaLim$Global[i+1], "?", TablaLim$Global[i-1] < TablaLim$Global[i+1] ))
+    # print(paste0(TablaLim$Global[i+1], "<", TablaLim$Global[i+2], "?", TablaLim$Global[i+1] < TablaLim$Global[i+2], "fin"))
+    # 
+    
+    if(TablaLim$Global[i-2] < TablaLim$Global[i-1] &
+       TablaLim$Global[i-2] < TablaLim$Global[i] & #| TablaLim$Global[i-1] >= TablaLim$Global[i] &
+       TablaLim$Global[i-1] < TablaLim$Global[i+1] &
+       TablaLim$Global[i+1] < TablaLim$Global[i+2])
+    { HaySerrucho2A <<- HaySerrucho2A + 1
+    TablaLim$Serrucho2A[(i-2):(i+2)] <- "Al alza"
+    }
+  } #FIN DEL FOR
+  return(TablaLim)
+}
+
+# -------------------------------------- CASO 2, ZIGZAG, ALZA ----------------------------------------#
+# TENDENCIAS SERRUCHO CASO 2: CUANDO SE FORMA UN ZIGZAG
+# EN ESTE CASO CUANDO LA TENDENCIA ES AL ALZA
+# EVALUANDO BLOQUES DE 6 PUNTOS CONSECUTIVOS
+
+SerruchoZigZagAlza <- function(TablaLim){
+  TablaLim$SerruchoZZA <- "nada"
+  HaySerruchoZZA <<- 0
+  
+  # CASO 2
+  for (i in 1:(nrow(TablaLim)-5)) {
+    # print(paste0("inicio", i, "evaluando", i, " - ", i+5))
+    # print(paste0(TablaLim$Global[i], " < ", TablaLim$Global[i+1], "?", TablaLim$Global[i] < TablaLim$Global[i+1]))
+    # print(paste0(TablaLim$Global[i+2], " > ", TablaLim$Global[i],"?" , TablaLim$Global[i+2] >  TablaLim$Global[i]))
+    #               # " o ", TablaLim$Global[i+2], " <= ", TablaLim$Global[i+1], "?"))
+    # print(paste0(TablaLim$Global[i+4], ">", TablaLim$Global[i+1], "?", TablaLim$Global[i+4] > TablaLim$Global[i+1], 
+    #          " o ", TablaLim$Global[i+4], " <= ", TablaLim$Global[i+3], TablaLim$Global[i+4] <=  TablaLim$Global[i+3], "?"))
+    # print(paste0(TablaLim$Global[i+3], " < ", TablaLim$Global[i+5], "? ", TablaLim$Global[i+3] < TablaLim$Global[i+5], "fin"))
+    
+    if(TablaLim$Global[i] < TablaLim$Global[i+1] &
+       TablaLim$Global[i+2] > TablaLim$Global[i] & # | TablaLim$Global[i+2] <= TablaLim$Global[i+1] &
+       TablaLim$Global[i+1] < TablaLim$Global[i+3] &
+       ( TablaLim$Global[i+4] > TablaLim$Global[i+1] | TablaLim$Global[i+4] <= TablaLim$Global[i+3]) &
+       TablaLim$Global[i+3] < TablaLim$Global[i+5])
+    { HaySerruchoZZA <<- HaySerruchoZZA + 1
+    TablaLim$SerruchoZZA[(i):(i+5)] <- "Al alza"
+    }
+  } #FIN DEL FOR
+  
+  return(TablaLim)
+}
+
+
+# -------------------------------------- CASO 2, ZIGZAG, BAJA ----------------------------------------#
+# TENDENCIAS SERRUCHO CASO 2: CUANDO SE FORMA UN ZIGZAG
+# EN ESTE CASO CUANDO LA TENDENCIA ES A LA BAJA
+# EVALUANDO BLOQUES DE 6 PUNTOS CONSECUTIVOS
+
+SerruchoZigZagBaja <- function(TablaLim){
+  TablaLim$SerruchoZZB <- "nada"
+  HaySerruchoZZB <<- 0
+  
+  # CASO 2
+  for (i in 1:(nrow(TablaLim)-5)) {
+    print(paste0("inicio", i, "evaluando", i, " - ", i+5))
+    print(paste0(TablaLim$Global[i], " > ", TablaLim$Global[i+1], "?", TablaLim$Global[i] > TablaLim$Global[i+1]))
+    print(paste0(TablaLim$Global[i+2], " < ", TablaLim$Global[i],"?" , TablaLim$Global[i+2] <  TablaLim$Global[i]))
+    # " o ", TablaLim$Global[i+2], " <= ", TablaLim$Global[i+1], "?"))
+    print(paste0(TablaLim$Global[i+1], " > ", TablaLim$Global[i+3], "?", TablaLim$Global[i+1] > TablaLim$Global[i+3]))
+    print(paste0(TablaLim$Global[i+4], " < ", TablaLim$Global[i+1], "?", TablaLim$Global[i+4] < TablaLim$Global[i+1]))
+    # " o ", TablaLim$Global[i+4], " <= ", TablaLim$Global[i+3], TablaLim$Global[i+4] <=  TablaLim$Global[i+3], "?"))
+    print(paste0(TablaLim$Global[i+3], " > ", TablaLim$Global[i+5], "? ", TablaLim$Global[i+3] > TablaLim$Global[i+5], "fin"))
+    
+    if(TablaLim$Global[i] > TablaLim$Global[i+1] &
+       TablaLim$Global[i+2] < TablaLim$Global[i] & # | TablaLim$Global[i+2] <= TablaLim$Global[i+1] &
+       TablaLim$Global[i+1] > TablaLim$Global[i+3] &
+       TablaLim$Global[i+4] < TablaLim$Global[i+1] & #| TablaLim$Global[i+4] >= TablaLim$Global[i+3]) &
+       TablaLim$Global[i+3] > TablaLim$Global[i+5])
+    { HaySerruchoZZB <<- HaySerruchoZZB + 1
+    TablaLim$SerruchoZZB[(i):(i+5)] <- "A la baja"
+    }
+  } #FIN DEL FOR
+  
+  return(TablaLim)
+}
+
+
+# # EDITANDO
+# SerruchoZigZagBaja <- function(TablaLim){
+# TablaLim$SerruchoZZB <- "nada"
+# HaySerruchoZZB <<- 0
+# for (i in 1:(nrow(TablaLim)-5)) {
+# print(paste0("inicio", i, "evaluando", i, " - ", i+5))
+# print(paste0(TablaLim$Global[i], " > ", TablaLim$Global[i+1], "?", TablaLim$Global[i] > TablaLim$Global[i+1]))
+# print(paste0(TablaLim$Global[i+2], " < ", TablaLim$Global[i],"?" , TablaLim$Global[i+2] <  TablaLim$Global[i]))
+#               # " o ", TablaLim$Global[i+2], " <= ", TablaLim$Global[i+1], "?"))
+# print(paste0(TablaLim$Global[i+1], " > ", TablaLim$Global[i+3], "?", TablaLim$Global[i+1] > TablaLim$Global[i+3]))
+# print(paste0(TablaLim$Global[i+4], " < ", TablaLim$Global[i+1], "?", TablaLim$Global[i+4] < TablaLim$Global[i+1]))
+#         # " o ", TablaLim$Global[i+4], " <= ", TablaLim$Global[i+3], TablaLim$Global[i+4] <=  TablaLim$Global[i+3], "?"))
+# print(paste0(TablaLim$Global[i+3], " > ", TablaLim$Global[i+5], "? ", TablaLim$Global[i+3] > TablaLim$Global[i+5], "fin"))
+# 
+#  if(TablaLim$Global[i] > TablaLim$Global[i+1] &
+#     TablaLim$Global[i+2] < TablaLim$Global[i]  &
+#     TablaLim$Global[i+1] > TablaLim$Global[i+3] &
+#     TablaLim$Global[i+4] < TablaLim$Global[i+1] & 
+#    TablaLim$Global[i+3] > TablaLim$Global[i+4] | TablaLim$Global[i+2] > TablaLim$Global[i+4]  & # NUEVO CAMBIO
+#     TablaLim$Global[i+3] > TablaLim$Global[i+5])
+#         { HaySerruchoZZB <<- HaySerruchoZZB + 1
+#           TablaLim$SerruchoZZB[(i):(i+5)] <- "A la baja"
+#         }
+# } #FIN DEL FOR
+# 
+# return(TablaLim)
+# }
+# 
+
+
+
+
+
+
+# -------------------------------------- JUNTANDO TENDENCIAS AL ALZA ----------------------------------------#
+#Juntando los diferentes tipos de tendencias
+
+JuntaTendenciasAlza<- function(TablaLim){
+  TablaLim$Serruchos <-"nada"
+  for (i in 1:(nrow(TablaLim))) {
+    if(TablaLim$SerruchoZZA[i] != "nada" | TablaLim$Serrucho2A[i] != "nada")
+    { ifelse(TablaLim$SerruchoZZA[i] != "nada", 
+             TablaLim$Serruchos[i] <- TablaLim$SerruchoZZA[i], 
+             TablaLim$Serruchos[i] <- TablaLim$Serrucho2A[i])
+    } #FIN DEL IF            
+  } #FIN DEL FOR
+  
+  # Diferenciando los grupos de las tendencias para las elipses
+  TablaLim$GrupoS <- "nada"
+  j = 0
+  for (i in 1:(nrow(TablaLim))) {
+    if(TablaLim$Serruchos[i] != 'nada' ){ # | i == nrow(TablaLim)){
+      TablaLim$GrupoS[i] <- paste0("Tendencia ", j)
+    } #FIN DEL IF
+    else {
+      #TablaLim$GrupoS[i] <- TablaLim$Serruchos[i]
+      j = j+1
+    } #FIN DEL ELSE
+  } #FIN DEL FOR
+  
+  return(TablaLim)
+}
+
+
+# -------------------------------------- JUNTANDO TENDENCIAS A LA BAJA ----------------------------------------#
+#Juntando los diferentes tipos de tendencias
+
+JuntaTendenciasBaja<- function(TablaLim){
+  TablaLim$Serruchos <-"nada"
+  for (i in 1:(nrow(TablaLim))) {
+    if(TablaLim$SerruchoZZB[i] != "nada" | TablaLim$Serrucho2B[i] != "nada")
+    { ifelse(TablaLim$SerruchoZZB[i] != "nada", 
+             TablaLim$Serruchos[i] <- TablaLim$SerruchoZZB[i], 
+             TablaLim$Serruchos[i] <- TablaLim$Serrucho2B[i])
+    } #FIN DEL IF            
+  } #FIN DEL FOR
+  
+  # Diferenciando los grupos de las tendencias para las elipses
+  TablaLim$GrupoS <- "nada"
+  j = 0
+  for (i in 1:(nrow(TablaLim))) {
+    if(TablaLim$Serruchos[i] != 'nada' ){ # | i == nrow(TablaLim)){
+      TablaLim$GrupoS[i] <- paste0("Tendencia ", j)
+    } #FIN DEL IF
+    else {
+      #TablaLim$GrupoS[i] <- TablaLim$Serruchos[i]
+      j = j+1
+    } #FIN DEL ELSE
+  } #FIN DEL FOR
+  
+  return(TablaLim)
+}
+
+
+
+```
+
+```{r LimitesDiagramaC, include=FALSE}
+
+
+
+  # ------ Fórmulas para los límites de control para la distribucion Poisson  
+  # Límites iniciales
+  C <- mean(nacional$Homicidios[1:10])
+  sigma <- sqrt(C)
+  
+  TablaLim <-  nacional %>%
+    transmute(Fechas,
+              Homicidios,
+              LS = C + 3*sigma,
+              LAS = C + 2*sigma,
+              LC = C,
+              LAI = C - 2*sigma,
+              LI = C - 3*sigma)
+  # ------ 
+  
+  
+  #CORRER ESTO PARA QUE SALGAN LAS FECHAS EN ORDEN CRONOLÓGICO
+# lock in factor level order
+TablaLim$Fechas <- factor(TablaLim$Fechas , levels = TablaLim$Fechas )  
+nacional$Fechas <- factor(nacional$Fechas , levels = nacional$Fechas ) 
+ 
+  
+  #ALERTAS Y ADVERTENCIAS INVERTIDAS
+#AlertasInvertidas <- function(TablaLim){
+  TablaLim$col <- NA
+  for (i in 1:(nrow(TablaLim))) {
+  ifelse(TablaLim$Homicidios[i] > TablaLim$LS[i], TablaLim$col[i] <- "red",
+  ifelse(between(TablaLim$Homicidios[i], TablaLim$LAS[i], 
+                 TablaLim$LS[i]), TablaLim$col[i] <- "orange",
+  ifelse(between(TablaLim$Homicidios[i], TablaLim$LAI[i], 
+                 TablaLim$LAS[i]), TablaLim$col[i] <- "black",
+  ifelse(between(TablaLim$Homicidios[i], TablaLim$LI[i], 
+                 TablaLim$LAI[i]), TablaLim$col[i] <- "green",
+                                TablaLim$col[i] <- "blue"))))}
+  
+  
+#  return(TablaLim)
+#}
+  
+  
+
+# ------------------ T E N D E N C I A S  S E R R U C H O S -------------------#
+# --------------------- CASO X, PICO EN P4, A la BAJA --------_----------------#
+# TENDENCIAS SERRUCHO CASO X: CUANDO SOLO UN PICO BAJA Y LUEGO CONTINUA LA TENDENCIA
+# EN ESTE CASO EL TERCER PICO CUANDO LA TENDENCIA ES A LA BAJA
+# EVALUANDO BLOQUES DE 5 PUNTOS CONSECUTIVOS
+SerruchoEnP4Baja <- function(TablaLim){
+  TablaLim$SerruchoP4B <- "nada"
+  HaySerruchoP4B <<- 0
+  
+  for (i in 3:(nrow(TablaLim)-2)) {
+
+    if(TablaLim$Homicidios[i-2] > TablaLim$Homicidios[i-1] & # P1 > P2
+       TablaLim$Homicidios[i-2] > TablaLim$Homicidios[i] & # P1 > P3
+       TablaLim$Homicidios[i-1] > TablaLim$Homicidios[i+1] & # P2 > P4 falta P3 < P4
+       TablaLim$Homicidios[i+1] > TablaLim$Homicidios[i+2]) # P4 > P5
+    { HaySerruchoP4B<<- HaySerruchoP4B + 1
+    TablaLim$SerruchoP4B[(i-2):(i+2)] <- "A la baja"
+    }
+  } #FIN DEL FOR
+  return(TablaLim)
+}
+
+
+TablaLim <- SerruchoEnP4Baja(TablaLim)
+
+
+```
+
+***
+<center>
+<p style = "font-size: 20px; color: Gray;"> HOMICIDIOS POR SEMANA EN MÉXICO </p>
+<p style = "font-size: 30px; color: Magenta;"> DIAGNÓSTICO: ESTABLE </p>
+<p style = "font-size: 20px; color: Gray;"> Diagrama C </p>
+
+```{r monitoreo, echo=FALSE}
+
+m <- ggplot(data = TablaLim, aes(x = Fechas, y = Homicidios)) +
+  geom_point(shape = 21, color = TablaLim$col, fill = TablaLim$col, 
+             size = ifelse(TablaLim$col == "black" , 2, 5))+
+  geom_line(aes(group = 1)) +
+    #Leyendas de cada dato
+  # geom_text(data=TablaLim, aes(x = fecha, y = Global,
+  #                              vjust = -1.5,    # nudge above top of bar
+  #                              label = Global),
+  #                              size = 3) +
+  labs(x = "", y = "") +
+  theme_light() +
+  #Para rotar leyendas del eje x
+  theme(axis.text.x=element_text(angle=45, hjust=0.9)) +
+  
+#-------------------------    LIMITES  INVERTIDOS  ----------------------------#
+  geom_step(data = TablaLim, mapping = aes(x = Fechas, y = LS, group = 1), 
+            color = "red", alpha=1, direction = "mid") +
+  geom_step(data = TablaLim, mapping = aes(x = Fechas, y = LAS, group = 1), 
+            color = "orange", alpha=1, direction = "mid")+
+  geom_step(data = TablaLim, mapping = aes(x = Fechas, y = LC, group = 1), 
+            color = "black", alpha=1, direction = "mid") +
+  geom_step(data = TablaLim, mapping = aes(x = Fechas, y = LAI, group = 1), 
+            color = "green", alpha=1, direction = "mid") +
+  geom_step(data = TablaLim, mapping = aes(x = Fechas, y = LI, group = 1), 
+            color = "blue", alpha=1, direction = "mid") +
+  
+  #### Etiquetas
+  annotate(geom = "text", x= 2.5, y= as.numeric(TablaLim[1,3]) + 3 , 
+           label= "Límite de Alerta Negativa", size = 3, color = "red") +
+   annotate(geom = "text", x= 2.9, y= as.numeric(TablaLim[1,4]) + 3 , 
+           label= "Límite de Advertencia Negativa", size = 3, color = "orange") +
+  annotate(geom = "text", x= 1.8, y= as.numeric(TablaLim[1,5]) + 3 , 
+           label= "Límite Central", size = 3) +
+   annotate(geom = "text", x= 2.8, y= as.numeric(TablaLim[1,6]) + 3 , 
+           label= "Límite de Advertencia Positiva", size = 3, color = "green") +
+  annotate(geom = "text", x= 2.5, y= as.numeric(TablaLim[1,7]) + 3 , 
+           label= "Límite de Alerta Positiva", size = 3, color = "blue") +
+  
+  #### Valores
+  annotate(geom = "text", x= nrow(TablaLim) - 0.25 , y= as.numeric(TablaLim[1,3]) + 3 , 
+           label= round(TablaLim[nrow(TablaLim), 3]), size = 3, color = "red") +
+   annotate(geom = "text", x= nrow(TablaLim) - 0.25, y= as.numeric(TablaLim[1,4]) + 3 , 
+           label= round(TablaLim[nrow(TablaLim), 4]), size = 3, color = "orange") +
+  annotate(geom = "text", x= nrow(TablaLim) - 0.25 , y= as.numeric(TablaLim[1,5]) + 3 , 
+           label= round(TablaLim[nrow(TablaLim), 5]), size = 3) +
+   annotate(geom = "text", x= nrow(TablaLim) - 0.25 , y= as.numeric(TablaLim[1,6]) + 3 , 
+           label= round(TablaLim[nrow(TablaLim), 6]), size = 3, color = "green") +
+  annotate(geom = "text", x= nrow(TablaLim) - 0.25 , y= as.numeric(TablaLim[1,7]) + 3 , 
+           label= round(TablaLim[nrow(TablaLim), 7]), size = 3, color = "blue")  +
+  
+    # Cambio de Sexenio
+  geom_vline(xintercept = 11.5, linetype = "dotted", color = "#8B475D", size = 0.8) +
+  geom_text(aes(x = 10.3, label = "AMLO", y = 608), size = 7, color = "#8B475D") +
+  geom_text(aes(x = 12.4, label = "CSP", y = 608), size = 7, color = "#8B475D") +
+  geom_text(aes(x = 10.3, label = "LC = 533", y = 595), size = 4, colour = "#8B475D") #+
+  
+ 
+
+
+#-----------------------------    TENDENCIAS    -------------------------------#
+
+  # geom_ribbon(data = TablaLim, aes( filter = SerruchoP4B != 'nada',
+  #                               xmin = 9, xmax = 13,
+  #                               ymin = TablaLim$Homicidios[13], ymax= TablaLim$Homicidios[9] ,
+  #                               group = 1), alpha = 0.25) +
+
+#   {if (HayTendencia > 0)  {
+ # {if (SerruchoP4B > 0)  {
+ # ggforce::geom_mark_ellipse(aes(fill = Tendencia, filter = Tendencia != 'nada',  group = Tendencia, label = Tendencia)) +
+  #ggforce::geom_mark_ellipse(aes(fill = Global, group = -1L, 
+  #                               filter = SerruchoP4B != 'nada' ), show.legend = FALSE) # +
+  #  }}  +
+ #Tendencia azul
+ # scale_fill_manual(values = "blue")
+
+# Para quitar leyenda de las tendencias
+#p + theme(legend.position="none")
+
+#print(m)
+
+```
+
+```{r Plotly, include=FALSE}
+m2 <- ggplotly(m)
+
+```
+
+```{r}
+m2
+```
+
+![](/Users/paulaborrego/Documents/SABA/R/Homicidios/recortado2.png){height='80'}
+<p style = "font-size: 20px; color: Gray;"> sabaconsultores.com </p>
+
+</center>
